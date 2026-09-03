@@ -36,3 +36,37 @@ Outputs `results_with_system.csv`, `results_baseline.csv`, `summary.png`.
 4. **Feed this into forecasting (Layer 3)** — once this loop is solid, have
    the scheduler run on *forecasted* solar/load instead of actual, and
    compare performance degradation — that's your third build block.
+
+## Dashboard (app.py) — Step 8
+
+A live, interactive Streamlit dashboard wrapping the same simulation, with
+sliders for household count, panel size, battery size, and a **peak-reserve
+rule** toggle (see below).
+
+### Run it
+```
+pip install streamlit
+streamlit run app.py
+```
+This opens a browser tab at `http://localhost:8501` with live sliders — this
+is what you present on your laptop screen during the demo, not the plain
+`python3 run_simulation.py` output.
+
+### What's new: the peak-reserve rule
+`scheduler.py` now supports `reserve_soc_frac` — it holds the battery above
+a chosen SoC floor *outside* the declared peak window, so there's real
+capacity saved for the peak itself, instead of the battery draining early.
+
+Real numbers from testing this:
+- At the original small sizing (5 kWp / 25 kWh), the reserve rule barely
+  moves peak reduction — because on cloudy days the battery never even
+  charges past the reserve floor, so there's nothing to "hold back."
+  **This is the actual finding: at small sizing, you're generation-limited,
+  not discharge-limited.**
+- At a slightly larger sizing (8 kWp / 40 kWh), enabling a 50% reserve floor
+  takes peak reduction from **3.9% → 15.2%**, at the cost of energy
+  reduction dropping slightly (53.9% → 49.9%).
+
+Use the dashboard sliders to reproduce this live in front of judges — it's a
+much stronger demo than a static number, because you're showing the actual
+sizing trade-off as it happens.

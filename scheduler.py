@@ -46,9 +46,17 @@ class Battery:
         self.soc_kwh += charge_kw * hours * self.round_trip_efficiency
         return charge_kw
 
-    def discharge(self, deficit_kw, hours=1.0):
-        """Discharge to cover a deficit for `hours`. Returns kW actually delivered."""
-        usable_kwh = self.soc_kwh - self.min_soc_frac * self.capacity_kwh
+    def discharge(self, deficit_kw, hours=1.0, floor_frac=None):
+        """
+        Discharge to cover a deficit for `hours`. Returns kW actually delivered.
+
+        floor_frac : SoC fraction the battery won't discharge below for THIS
+                     call. Defaults to `min_soc_frac`. The scheduler uses this
+                     to implement peak-reserve logic — see `reserve_soc_frac`
+                     in run_priority_schedule().
+        """
+        floor = self.min_soc_frac if floor_frac is None else max(floor_frac, self.min_soc_frac)
+        usable_kwh = self.soc_kwh - floor * self.capacity_kwh
         max_by_power = self.max_discharge_kw * hours
         max_by_soc = max(usable_kwh, 0)
         discharge_kw = min(deficit_kw, max_by_power / hours, max_by_soc / hours)
@@ -60,13 +68,21 @@ class Battery:
         return self.soc_kwh / self.capacity_kwh
 
 
-def run_priority_schedule(solar_df, load_df, battery: Battery, tod_peak_hours=(18, 22)):
+def run_priority_schedule(solar_df, load_df, battery: Battery, tod_peak_hours=(18, 22),
+                           reserve_soc_frac=0.0):
     """
     Runs the hour-by-hour priority-order allocation described above.
 
-    tod_peak_hours : (start_hour, end_hour) treated as the DISCOM's declared
-                      peak window — used only for the DR-signal flag in the
-                      output, not to change the physics of the allocation.
+    tod_peak_hours    : (start_hour, end_hour) treated as the DISCOM's declared
+                         peak window.
+    reserve_soc_frac  : PEAK-RESERVE RULE. Outside the peak window, the battery
+                         will not discharge below this SoC fraction, holding
+                         capacity back specifically for the peak window (where
+                         it's still allowed to discharge down to min_soc_frac).
+                         0.0 (default) = old behaviour, no reserve.
+                         Try 0.4-0.5 to see real peak-shaving improve at the
+                         cost of some energy-side savings — this is the fix
+                         for the "battery is empty before the peak" finding.
 
     Returns a DataFrame, one row per hour, with the full energy breakdown —
     this is what run_simulation.py uses to compute the Section 4.2 metrics.
@@ -90,14 +106,18 @@ def run_priority_schedule(solar_df, load_df, battery: Battery, tod_peak_hours=(1
         battery_charge_kw = battery.charge(surplus_solar_kw) if surplus_solar_kw > 0 else 0.0
         curtailed_solar_kw = surplus_solar_kw - battery_charge_kw  # unused if battery full
 
-        # Step 3: discharge battery to cover remaining load
-        battery_discharge_kw = battery.discharge(remaining_load_kw) if remaining_load_kw > 0 else 0.0
+        # Step 3: discharge battery to cover remaining load — respecting the
+        # peak-reserve floor when we're outside the declared peak window
+        in_peak_window = tod_peak_hours[0] <= hour < tod_peak_hours[1]
+        floor_frac = battery.min_soc_frac if in_peak_window else reserve_soc_frac
+        battery_discharge_kw = (
+            battery.discharge(remaining_load_kw, floor_frac=floor_frac) if remaining_load_kw > 0 else 0.0
+        )
         remaining_load_kw -= battery_discharge_kw
 
         # Step 4: whatever's left comes from the grid
         grid_kw = max(remaining_load_kw, 0)
 
-        in_peak_window = tod_peak_hours[0] <= hour < tod_peak_hours[1]
         dr_signal_fired = in_peak_window and grid_kw > 0.3 * load_kw  # simple trigger rule
 
         records.append({
